@@ -17,25 +17,33 @@ const (
 
 // PacketEvent describes an individual packet
 type PacketEvent struct {
-	EventType EventType
-	Time      time.Time
-	SrcIP     string
-	SrcPort   string
-	DstIP     string
-	DstPort   string
-	Type      []string
-	Size      int
+	Group      string
+	PacketID   uint64
+	Time       time.Time
+	Seq        uint32
+	Ack        uint32
+	SrcIP      string
+	SrcPort    string
+	DstIP      string
+	DstPort    string
+	FlagSYN    uint8
+	FlagFIN    uint8
+	FlagACK    uint8
+	FlagRST    uint8
+	FlagPSH    uint8
+	SizeTCP    int
+	SizePacket int
 }
 
 // MongoEvent records operations and their packetization
 type MongoEvent struct {
-	Type        EventType
+	Group       string
+	EventID     uint64    // unique id of this event across all streams
 	Start       time.Time // earliest packet seen for this event
 	End         time.Time // latest packet seen for this event
 	StreamID    uint64    // id of the stream this event belongs to
-	StreamStart bool      // one of the packets in this event was a TCP SYN
-	StreamEnd   bool      // one of the packets in this event was a TCP FIN or RST
-	EventID     uint64    // unique id of this event across all streams
+	StreamStart uint8     // one of the packets in this event was a TCP SYN
+	StreamEnd   uint8     // one of the packets in this event was a TCP FIN or RST
 	SrcIP       string
 	SrcPort     string
 	DstIP       string

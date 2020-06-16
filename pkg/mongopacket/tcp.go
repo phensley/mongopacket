@@ -1,12 +1,9 @@
 package mongopacket
 
 import (
-	"bufio"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"sync"
 	"time"
 
@@ -39,8 +36,9 @@ type PacketDetails struct {
 
 // TCPStream ..
 type TCPStream struct {
-	handle  *pcap.Handle
-	factory *MongoStreamFactory
+	Handle  *pcap.Handle
+	Factory *MongoStreamFactory
+	Storage Storage
 }
 
 var packetDetailsPool = sync.Pool{
@@ -49,19 +47,11 @@ var packetDetailsPool = sync.Pool{
 	},
 }
 
-// NewTCPStream ..
-func NewTCPStream(handle *pcap.Handle, factory *MongoStreamFactory) *TCPStream {
-	return &TCPStream{
-		handle:  handle,
-		factory: factory,
-	}
-}
-
 // Run ...
 func (t *TCPStream) Run() error {
 	mongoport := layers.TCPPort(27017)
 
-	pool := tcpassembly.NewStreamPool(t.factory)
+	pool := tcpassembly.NewStreamPool(t.Factory)
 	assembler := tcpassembly.NewAssembler(pool)
 
 	pkt := PacketLayers{}
@@ -69,51 +59,32 @@ func (t *TCPStream) Run() error {
 
 	layerType := make([]gopacket.LayerType, 0, 10)
 
-	index, err := os.OpenFile("x-2020-06-08-xkkc7-event-2.tsv", os.O_WRONLY|os.O_CREATE, 0644)
-	if err != nil {
-		return err
-	}
+	// TODO: abstract away storage layer. This is all hard-coded for now as I'm
+	// only using this code to get the data for my own analysis.
 
-	blobs, err := os.OpenFile("x-2020-06-08-xkkc7-event-2-blobs.tsv", os.O_WRONLY|os.O_CREATE, 0644)
-	if err != nil {
-		return err
-	}
-
-	packets, err := os.OpenFile("x-2020-06-08-xkkc7-packets.tsv", os.O_WRONLY|os.O_CREATE, 0644)
-	if err != nil {
-		return err
-	}
-
+	// Open connection to Clickhouse. We bulk-insert our data into CH database
+	// where it can be queried for analysis and to produce graphs.
 	ch := make(chan *MongoEvent, 0)
-	t.factory.ch = ch
-	t.factory.verbose = false
+	t.Factory.ch = ch
+	t.Factory.verbose = false
 
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 
-	// When we exit the function, close the event channel
+	// When we exit the function, close the event channel and flush the storage
 	defer (func() {
 		fmt.Println("exiting")
 		time.Sleep(5000)
 		ch <- nil
 		wg.Wait()
+		t.Storage.Flush()
 	})()
 
 	go (func() {
 		var evt *MongoEvent
 
-		defer index.Close()
-		defer blobs.Close()
-
-		// TODO: separate out TSV encoder
-		// TODO: add Clickhouse backend
-
 		iter := 0
-		w1 := bufio.NewWriterSize(index, 16*1024*1024)
-		w1.WriteString("ts\tte\tsrc\tsrcport\tdst\tdstport\tstream\tstmstart\tstmend\tevent\topcode\trequest\tresponse\n")
-
-		w2 := bufio.NewWriterSize(blobs, 16*1024*1024)
-		w2.WriteString("event\top\n")
+		evts := []*MongoEvent{}
 
 	loop:
 		for {
@@ -127,79 +98,28 @@ func (t *TCPStream) Run() error {
 				if iter%10000 == 0 {
 					fmt.Printf("Wrote %d events\n", iter)
 				}
-				if true {
-					h := evt.Op.GetHeader()
 
-					// Timestamps in microseconds
-					w1.WriteString(fmt.Sprintf("%d", evt.Start.UnixNano()/1e3))
-					w1.WriteString("\t")
-					w1.WriteString(fmt.Sprintf("%d", evt.End.UnixNano()/1e3))
-					w1.WriteString("\t")
+				evts = append(evts, evt)
 
-					// Source address and port
-					w1.WriteString(evt.SrcIP)
-					w1.WriteString("\t")
-					w1.WriteString(evt.SrcPort)
-					w1.WriteString("\t")
-
-					// Destination address and port
-					w1.WriteString(evt.DstIP)
-					w1.WriteString("\t")
-					w1.WriteString(evt.DstPort)
-					w1.WriteString("\t")
-
-					// Identify stream identifier and attributes
-					w1.WriteString(fmt.Sprintf("%d", evt.StreamID))
-					w1.WriteString("\t")
-					if evt.StreamStart {
-						w1.WriteString("1")
-					} else {
-						w1.WriteString("0")
-					}
-					w1.WriteString("\t")
-					if evt.StreamEnd {
-						w1.WriteString("1")
-					} else {
-						w1.WriteString("0")
-					}
-					w1.WriteString("\t")
-
-					// Event identifier
-					w1.WriteString(fmt.Sprintf("%d", evt.EventID))
-					w1.WriteString("\t")
-
-					// Mongo opcode, almost always OP_MSG or OP_REPLY
-					w1.WriteString(h.OpCode.String())
-					w1.WriteString("\t")
-
-					// Mongo request and response identifiers
-					w1.WriteString(fmt.Sprintf("%d", h.RequestID))
-					w1.WriteString("\t")
-					w1.WriteString(fmt.Sprintf("%d", h.ResponseTo))
-					w1.WriteString("\n")
-
-					// Write Mongo message blob indexed by event id.
-					op, err := json.Marshal(&evt.Op)
-					if err != nil {
-						continue
-					}
-
-					w2.WriteString(fmt.Sprintf("%d", evt.EventID))
-					w2.WriteString("\t")
-					w2.WriteString(string(op))
-					w2.WriteString("\n")
-
+				// Save batch of events
+				if len(evts) == 50000 {
+					t.Storage.SaveMongoEvents(evts)
+					evts = evts[:0]
 				}
 			}
 		}
 
-		// Flush streams and indicate we're finished
-		w1.Flush()
-		w2.Flush()
+		// Save the last batch of events
+		if len(evts) > 0 {
+			t.Storage.SaveMongoEvents(evts)
+			evts = evts[:0]
+		}
+
 		wg.Done()
 	})()
 
 	var (
+		err  error
 		raw  []byte
 		info gopacket.CaptureInfo
 	)
@@ -208,17 +128,15 @@ func (t *TCPStream) Run() error {
 	interval := time.Second * 10
 	last := time.Time{}
 
-	w3 := bufio.NewWriterSize(packets, 16*1024*1024)
-	w3.WriteString("time\tsrc\tsrcport\tdst\tdstport\tsyn\tfin\tack\n")
+	pktevts := []*PacketEvent{}
 
-	defer (func() {
-		w3.Flush()
-		packets.Close()
-	})()
+	// TODO: I'm only considering a single packet trace at the moment, so the
+	// group name is hard-coded
+	group := "xkkc7"
 
-	n := 0
+	n := uint64(0)
 	for {
-		raw, info, err = t.handle.ZeroCopyReadPacketData()
+		raw, info, err = t.Handle.ZeroCopyReadPacketData()
 		if err != nil {
 			assembler.FlushAll()
 			if err == io.EOF {
@@ -231,13 +149,13 @@ func (t *TCPStream) Run() error {
 
 		err = parser.DecodeLayers(raw, &layerType)
 		if err != nil {
-			// Ignore this error, since some DNS packets leak in and we're not decoding UDP
+			// Ignore this error, since some DNS packets leaked in and we're not decoding UDP layer
 			continue
 		}
 
 		n++
 		if n%10000 == 0 {
-			fmt.Printf("%d packets processed\n", n)
+			fmt.Printf("%d packets seen\n", n)
 		}
 
 		// Every N seconds flush the assembler
@@ -247,46 +165,16 @@ func (t *TCPStream) Run() error {
 			last = info.Timestamp
 		}
 
-		src := pkt.ipv4.SrcIP.String()
-		srcport := pkt.tcp.SrcPort.String()
-		dst := pkt.ipv4.DstIP.String()
-		dstport := pkt.tcp.DstPort.String()
+		pktevt := packetEvent(pkt, info, n, group)
 
-		// Write packet timestamp in microseconds
-		w3.WriteString(fmt.Sprintf("%d", info.Timestamp.UnixNano()/1e3))
-		w3.WriteString("\t")
-
-		// Source address and port
-		w3.WriteString(src)
-		w3.WriteString("\t")
-		w3.WriteString(srcport)
-		w3.WriteString("\t")
-
-		// Dest address and port
-		w3.WriteString(dst)
-		w3.WriteString("\t")
-		w3.WriteString(dstport)
-		w3.WriteString("\t")
-
-		// TCP flags
-		if pkt.tcp.SYN {
-			w3.WriteString("1")
-		} else {
-			w3.WriteString("0")
+		pktevts = append(pktevts, pktevt)
+		if len(pktevts) == 50000 {
+			if err = t.Storage.SavePacketEvents(pktevts); err != nil {
+				fmt.Println("Error saving events:", err)
+				// Continue on for now
+			}
+			pktevts = pktevts[:0]
 		}
-		w3.WriteString("\t")
-		if pkt.tcp.FIN {
-			w3.WriteString("1")
-		} else {
-			w3.WriteString("0")
-		}
-		w3.WriteString("\t")
-		if pkt.tcp.ACK {
-			w3.WriteString("1")
-		} else {
-			w3.WriteString("0")
-		}
-		w3.WriteString("\n")
 
 		// If we see a packet going to or from Mongo 27017, assemble that TCP stream to extract
 		// the Mongo messages
@@ -295,13 +183,22 @@ func (t *TCPStream) Run() error {
 		}
 
 	}
+
+	if len(pktevts) > 0 {
+		if err = t.Storage.SavePacketEvents(pktevts); err != nil {
+			fmt.Println("Error saving events:", err)
+			// Continue on for now
+		}
+		pktevts = pktevts[:0]
+	}
+
 	return nil
 }
 
 func packetParser(p *PacketLayers) *gopacket.DecodingLayerParser {
 	// Ignore ethernet for now, we're only dealing with pcap loopback
 	decodingLayers := []gopacket.DecodingLayer{
-		// Some packet traces will have this Linux SLL layer
+		// Some packet traces have had this Linux SLL layer
 		// &p.sll,
 		&p.eth,
 		&p.ipv4,
@@ -313,51 +210,39 @@ func packetParser(p *PacketLayers) *gopacket.DecodingLayerParser {
 	// return gopacket.NewDecodingLayerParser(layers.LayerTypeLinuxSLL, decodingLayers...)
 }
 
-func packetEvent(p PacketLayers, c gopacket.CaptureInfo) *PacketEvent {
+func packetEvent(p PacketLayers, c gopacket.CaptureInfo, packetID uint64, group string) *PacketEvent {
 	d := &PacketEvent{}
 
+	d.Group = group
+	d.PacketID = packetID
 	d.Time = c.Timestamp
+	d.Seq = p.tcp.Seq
+	d.Ack = p.tcp.Ack
 	d.SrcIP = p.ipv4.SrcIP.String()
 	d.SrcPort = p.tcp.SrcPort.String()
 	d.DstIP = p.ipv4.DstIP.String()
 	d.DstPort = p.tcp.DstPort.String()
-	d.Size = len(p.tcp.Payload)
+	d.SizeTCP = len(p.tcp.Payload)
+	d.SizePacket = c.CaptureLength
 
 	if p.tcp.FIN {
-		d.Type = append(d.Type, "FIN")
+		d.FlagFIN = 1
 	}
 
 	if p.tcp.SYN {
-		d.Type = append(d.Type, "SYN")
+		d.FlagSYN = 1
 	}
 
 	if p.tcp.RST {
-		d.Type = append(d.Type, "RST")
+		d.FlagRST = 1
 	}
 
 	if p.tcp.PSH {
-		d.Type = append(d.Type, "PSH")
-
+		d.FlagPSH = 1
 	}
+
 	if p.tcp.ACK {
-		d.Type = append(d.Type, "ACK")
+		d.FlagACK = 1
 	}
-
-	if p.tcp.URG {
-		d.Type = append(d.Type, "URG")
-	}
-
-	if p.tcp.ECE {
-		d.Type = append(d.Type, "ECE")
-	}
-
-	if p.tcp.CWR {
-		d.Type = append(d.Type, "CWR")
-	}
-
-	if p.tcp.NS {
-		d.Type = append(d.Type, "NS")
-	}
-
 	return d
 }

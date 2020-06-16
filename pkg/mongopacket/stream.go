@@ -69,7 +69,6 @@ func (s *MongoStreamFactory) New(net, transport gopacket.Flow) tcpassembly.Strea
 		DstIP:   dst.String(),
 		DstPort: dstport.String(),
 	}
-	// fmt.Printf("%s: new stream\n", m)
 	return m
 }
 
@@ -185,10 +184,10 @@ func (s *MongoStream) Reassembled(reassemblies []tcpassembly.Reassembly) {
 					end = p.Time
 				}
 				if p.StreamStart {
-					evt.StreamStart = true
+					evt.StreamStart = 1
 				}
 				if p.StreamEnd {
-					evt.StreamEnd = true
+					evt.StreamEnd = 1
 				}
 				evt.Packets = append(evt.Packets, &EventPacket{
 					Time:   p.Time.UTC().Format(time.RFC3339Nano),

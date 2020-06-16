@@ -51,15 +51,7 @@ func Decompress(r *bufio.Reader, h *Header) ([]byte, error) {
 
 	case CompressorSnappy:
 		out := make([]byte, size)
-		dec, err := snappy.Decode(out, data)
-		if err != nil {
-			x := len(data)
-			if x > 48 {
-				x = 48
-			}
-			return nil, fmt.Errorf("%s:  %v", err, data[:x])
-		}
-		return dec, nil
+		return snappy.Decode(out, data)
 
 	case CompressorZlib:
 		dec, err := zlib.NewReader(bytes.NewReader(data))
@@ -74,7 +66,7 @@ func Decompress(r *bufio.Reader, h *Header) ([]byte, error) {
 
 	case CompressorZstd:
 		out := make([]byte, size)
-		dec := zstd.NewReader(bytes.NewReader(out))
+		dec := zstd.NewReader(bytes.NewReader(data))
 		if _, err := io.ReadFull(dec, out); err != nil {
 			return nil, err
 		}

@@ -55,8 +55,6 @@ func (o *Msg) GetHeader() *Header {
 func (o *Msg) Read(r *bufio.Reader, h *Header) error {
 	o.Header = h
 
-	// fmt.Println("op_msg message len", h.MessageLength)
-
 	var length int
 	var raw [4]byte
 	var d = raw[:]
@@ -93,9 +91,7 @@ func (o *Msg) Read(r *bufio.Reader, h *Header) error {
 
 		case SectionKindBody:
 			// Decode section body
-			// fmt.Println("section body sz ", sz)
 			o.Body, length, err = document(r)
-			// if o.Body, err = document(r); err != nil {
 			if err != nil {
 				return fmt.Errorf("op_msg read document byte sz=%d %s", sz, err)
 			}
@@ -103,7 +99,6 @@ func (o *Msg) Read(r *bufio.Reader, h *Header) error {
 
 		case SectionKindDocSeq:
 			// Decode document sequence
-			// fmt.Println("section doc seq sz ", sz)
 			if _, err := io.ReadFull(r, d); err != nil {
 				return fmt.Errorf("op_msg read doc seq size sz=%d %s", sz, err)
 			}
@@ -111,20 +106,16 @@ func (o *Msg) Read(r *bufio.Reader, h *Header) error {
 			// Decode section size
 			size := int(DecodeInt32LE(d, 0))
 
-			// name, err := cstring(r)
-			// if err != nil {
-			// 	return err
-			// }
-			// fmt.Println("name", name)
-
 			// TODO: decode section object sequence
+
+			// NOTE: I haven't seen any of these in our packet traces so I have not
+			// yet bothered to decode it.
 			_, err = r.Discard(size - 4)
 			if err != nil {
 				return fmt.Errorf("op_msg doc seq discard size=%d sz=%d %s", size-4, sz, err)
 			}
 
 			sz -= size
-			// fmt.Println("sz=", sz, "  remain=", r.Buffered())
 			break
 		}
 
